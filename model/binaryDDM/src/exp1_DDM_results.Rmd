@@ -1,0 +1,510 @@
+---
+title: "Computational model - Choice"
+output: 
+  github_document:
+    fig_width: 8
+    fig_height: 5
+    keep_html: TRUE
+---
+
+```{r setup, include=FALSE}
+rm(list=ls()) 
+
+library(kableExtra)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+
+knitr::opts_chunk$set(echo = FALSE, include = FALSE)
+
+theme_set(theme_classic() +
+            theme(text = element_text(size = 14)))
+```
+
+# Description of models 
+
+1. Effect of context on starting point
+- Baseline model: No bias in starting point 
+
+$$
+z_i = 0.5
+$$
+- Target only model: The value of the target products determines the starting point
+
+$$
+z_1 \sim z_0 + z_1 \Delta x_{target,i}
+$$
+
+$$
+\Delta x_{target,i}  = 
+x_{higher-value \ target, \ i} - 
+x_{lower-value \ target, \ i}
+$$
+
+- Context model: The value of all products determines the starting point. Here, $\Delta x_{side,i}$ represents the difference between the summed value of the three products on each side of trial. $x_i$ represents the mean bid for the product at trial $i$.
+
+$$
+z_i \sim z_0 + z_1 \Delta\ x_{side,i}
+$$
+
+$$
+\Delta x_{side,i}  = 
+∑x_{higher-value \ target \ side, \ i} - 
+∑x_{lower-value \ target \ side, \ i}
+$$
+
+2. Effect of context on drift rate
+
+- Target only model: Only the values of the targets determine the drift rate. Here, $\Delta x_{target}$ represents the value difference between the two target products in trial i. 
+
+$$
+v_i = v_0 + v_1 \Delta x_{target}
+$$
+
+- Context model: The values of all products determine the drift rate. $\Delta x_{context,i}$ represents the difference between the summed value of the two non-target groups of products in the trial. 
+
+$$
+v_i = v_0 + v_1 \Delta x_{target} + v_2 \Delta x_{context,i} 
+$$
+
+- Constructed six models, considering combinations of context effects on starting point and drift rate.
+- Fitted six models to the choice and RT data using HDDM package in python.
+
+
+# Model comparison 
+- The performance of six models was compared by Bayesian Predictive Information Criterion (BPIC). The model with the lowest BPIC was selected as the best model. 
+- Among the six models considered, the best-fitting DDM included context effects on both starting point and drift rate.
+
+
+```{r BPIC-load}
+tmp = lapply(sprintf("Model2%s_dic_info.csv", letters[1:6]), 'read.csv', header = TRUE)
+dic_info = do.call(rbind.data.frame, tmp)
+dic_info = data.frame(
+  name = sprintf("Model2%s", letters[1:6]),
+  dic_info, 
+  zType = rep(c("Target-only", "Baseline", "Context"), each = 2),
+  vType = rep(c("Target-only", "Context"), 3)) %>%
+  mutate(BPIC = deviance + 2*pD,
+         vType = factor(vType, levels = c("Target-only", "Context")),
+         zType = factor(zType, levels = c("Baseline", "Target-only", "Context"))) %>%
+  arrange(zType, vType) %>% 
+  mutate(modelNum = sprintf("Model%d", 1:n()))
+```
+
+
+```{r BPIC-plot, include = TRUE}
+fig = ggplot(dic_info, aes(y = vType, x = zType, fill = BPIC)) +
+  geom_tile(color = "white", lwd = 1.5, linetype = 1, alpha = 0.9) + 
+  geom_text(aes(label = round(BPIC, 2)), color = "black", size = 5) +
+  ggstar::geom_star(aes(x = 3, y = 2.3), size = 10, 
+                    fill = "yellow", color = "yellow") +
+  scale_fill_gradient(low = "firebrick2",  high = "royalblue") + 
+  labs(x = "Starting point", y = "Drift rate", 
+       title = "Model comparison", 
+       fill = "BPIC")
+fig
+```
+
+
+## Marginal effect of each model component 
+
+- The largest improvement in fit was due to context effects on starting point (ΔBPIC = -171.56), though the improvement due to context effects on drift was credible (ΔBPIC = -76.07). 
+
+```{r marginal-effect}
+z_effect = dic_info %>% 
+  group_by(zType) %>% 
+  reframe(mean_BPIC= mean(BPIC), 
+          n = n()) %>%
+  ungroup() %>%
+  mutate(delta_BPIC = mean_BPIC - mean_BPIC[1]) %>%
+  mutate(delta_BPIC = round(delta_BPIC, 2), 
+         mean_BPIC = round(mean_BPIC, 2)) %>%
+  rename(submodel = zType)
+
+v_effect = dic_info %>% 
+  group_by(vType) %>% 
+  reframe(mean_BPIC = mean(BPIC), 
+          n = n()) %>%
+  ungroup() %>% 
+  mutate(delta_BPIC = mean_BPIC - mean_BPIC[1]) %>% 
+  mutate(delta_BPIC = round(delta_BPIC, 2), 
+         mean_BPIC = round(mean_BPIC, 2)) %>%
+  rename(submodel = vType)
+
+marginal_effect = rbind(
+  data.frame(model = "Starting point", 
+             z_effect %>% select(!n) %>%
+               rename(meanBPIC = mean_BPIC,
+                      deltaBPIC = delta_BPIC)),
+  data.frame(model = "Drift rate", 
+             v_effect %>% select(!n) %>%
+               rename(meanBPIC = mean_BPIC,
+                      deltaBPIC = delta_BPIC)))
+
+```
+
+
+```{r marginal-effect-table, include = TRUE}
+kable(marginal_effect, 
+      caption = "Marginal effect of each model component")
+```
+
+```{r marginal-effect-plot, include = TRUE}
+dic_info %>%
+  select(modelNum, zType, vType, BPIC) %>%
+  pivot_longer(!c(modelNum,BPIC), 
+               names_to = "tmpName",
+               values_to = "type") %>%
+  mutate(facetName = ifelse(tmpName == "vType", "Drift rate","Starting point")) %>%
+  ggplot(aes(x = type, y = BPIC)) +
+  geom_boxplot() +
+  facet_wrap(~factor(facetName), scales = "free") +
+  labs(x  = "")
+```
+
+
+# Posterior distributions of the best-fitting model 
+
+```{r posterior-load}
+source("plot_hddm_samples.R")
+
+nChain = 3
+nSample = 6000
+samples = read.csv("Model2f_samples.csv")
+samples$chain = rep(1:nChain, each = nSample)
+samples$sampleNum = samples$X+1
+```
+
+## Group level posterior distribution
+
+### Starting point 
+
+The value of all products determines the starting point. 
+
+- 95% highest density interval (HDI) 
+
+```{r posterior-group-z-table, include = TRUE}
+tmp = samples %>% 
+  select(one_of("z_Intercept_trans","z_sumVD")) %>% 
+  pivot_longer(everything(), names_to = "tmpName", values_to = "sampleValue") %>%
+  mutate(paramName = case_when(tmpName == "z_Intercept_trans" ~ "z0", 
+                               tmpName == "z_sumVD" ~ "z1"))
+
+tmp2 = tmp %>% 
+  group_by(paramName) %>% 
+  reframe(hdi_low = HDIofMCMC(sampleValue)[1],
+            hdi_high = HDIofMCMC(sampleValue)[2],
+            sampleMean = mean(sampleValue))
+kable(tmp2, 
+      caption = "95% HDI of group level posterior distribution", 
+      digits = 3)
+```
+
+
+- Posterior distribution
+  - Dots and grey bars represent the mean and the 95% HDI.
+
+```{r posterior-group-z-fig, include = TRUE}
+ggplot(tmp, aes(x = sampleValue)) +
+  geom_density(size = 0.5) + 
+  geom_segment(data = tmp2, aes(x=hdi_low,xend=hdi_high, y=0, yend=0), # add HDI
+               color = "grey", size = 1) +
+  geom_point(data = tmp2, aes(x = sampleMean, y = 0), # add mean
+             shape = 21, size = 2, color = "black", fill = "grey") +
+  labs(x = "Posterior sample", y = "Density", 
+       title = "Starting point - Group level") +
+  theme(legend.position = "none") +
+  facet_wrap(~factor(paramName), scales = "free")
+```
+
+### Drift rate
+
+The values of all products linearly determine the drift rate. 
+
+- 95% highest density interval (HDI) 
+
+```{r, posterior-group-v-table, include = TRUE}
+tmp = samples %>% 
+  select(one_of("v_Intercept","v_tVD", "v_cVD")) %>% 
+  pivot_longer(everything(), names_to = "tmpName", values_to = "sampleValue") %>%
+  mutate(paramName = case_when(tmpName == "v_Intercept" ~ "v0", 
+                               tmpName == "v_tVD" ~ "v1",
+                               tmpName == "v_cVD" ~ "v2"))
+
+tmp2 = tmp %>% 
+  group_by(paramName) %>% 
+  summarise(hdi_low = HDIofMCMC(sampleValue)[1],
+            hdi_high = HDIofMCMC(sampleValue)[2],
+            sampleMean = mean(sampleValue))
+kable(tmp2,
+      caption = "95% HDI of group level posterior distribution", 
+      digits = 3)
+```
+
+
+- Posterior distribution 
+  - Dots and grey bars represent the mean and the 95% HDI.
+  
+```{r posterior-group-v-fig, include = TRUE}
+ggplot(tmp, aes(x = sampleValue)) +
+  geom_density(size = 0.5) + 
+  geom_segment(data = tmp2, aes(x=hdi_low,xend=hdi_high, y=0, yend=0), # add HDI
+               color = "grey", size = 1) +
+  geom_point(data = tmp2, aes(x = sampleMean, y = 0), # add mean
+             shape = 21, size = 2, color = "black", fill = "grey") +
+  labs(x = "Posterior sample", y = "Density", 
+       title = "Drift rate - group level") +
+  theme(legend.position = "none") +
+  facet_wrap(~factor(paramName), scales = "free") 
+```
+
+## Individual level posterior distributions
+
+### Starting point
+- Y axis: Dots and grey bars represent the mean and the 95% HDI.
+- X axis: Participant index. Participants were sorted by the mean of posterior distribution. 
+
+```{r posterior-ind-z-prep}
+# intercept
+z0_values = samples %>% 
+  select(one_of(sprintf("z_Intercept_subj_trans.%d", 1:24))) %>% 
+  mutate(sampleNum = 1:n()) %>%
+  pivot_longer(!sampleNum, names_to = "subj_idx", 
+               names_transform = list("subj_idx" = as.integer),
+               names_prefix = "z_Intercept_subj_trans.", values_to = "z0")
+z1_values = samples %>% 
+  select(one_of(sprintf("z_sumVD_subj.%d", 1:24))) %>% 
+  mutate(sampleNum = 1:n()) %>%
+  pivot_longer(!sampleNum, names_to = "subj_idx", 
+               names_transform = list("subj_idx" = as.integer),
+               names_prefix = "z_sumVD_subj.", values_to = "z1") 
+
+z_all = z0_values %>% 
+  right_join(z1_values, by = c("sampleNum", "subj_idx")) 
+rm(list = c("z0_values", "z1_values"))
+
+z_summary = z_all %>%
+  select(subj_idx, z0, z1) %>% 
+  pivot_longer(!subj_idx, 
+               names_to = "paramName", 
+               values_to = "sampleValue") %>%
+  group_by(subj_idx, paramName) %>% 
+  reframe(hdi_low = HDIofMCMC(sampleValue)[1],
+          hdi_high = HDIofMCMC(sampleValue)[2],
+          sampleMean = mean(sampleValue)) %>% 
+  group_by(paramName) %>%
+  arrange(desc(sampleMean)) %>%
+  mutate(idx = 1:n())
+```
+
+
+
+```{r posterior-ind-z-plot, include = TRUE}
+ggplot(z_summary, aes(x = idx)) + 
+  geom_segment(aes(y=hdi_low,yend=hdi_high, x=idx, xend=idx), 
+               color = "grey", size = 1)  +
+  geom_point(aes(y = sampleMean), color = "black") + 
+  facet_wrap(~factor(paramName), scales = "free") +
+  geom_hline(yintercept = 0, color = "red", alpha = 1, linetype = "dotted") +
+  labs(x = "Subject", y = "Posterior density",
+       title = "Starting point - Individual level")
+```
+
+
+### Drift rate
+
+- Y axis: Dots and grey bars represent the mean and the 95% HDI.
+- X axis: Participant index. Participants were sorted by the mean of posterior distribution. 
+
+```{r posterior-ind-v-prep}
+# intercept
+v0_values = samples %>% 
+  select(one_of(sprintf("v_Intercept_subj.%d", 1:24))) %>% 
+  mutate(sampleNum = 1:n()) %>%
+  pivot_longer(!sampleNum, names_to = "subj_idx", 
+               names_transform = list("subj_idx" = as.integer),
+               names_prefix = "v_Intercept_subj.", values_to = "v0")
+v1_values = samples %>% 
+  select(one_of(sprintf("v_tVD_subj.%d", 1:24))) %>% 
+  mutate(sampleNum = 1:n()) %>%
+  pivot_longer(!sampleNum, names_to = "subj_idx", 
+               names_transform = list("subj_idx" = as.integer),
+               names_prefix = "v_tVD_subj.", values_to = "v1") 
+v2_values = samples %>% select(one_of(sprintf("v_cVD_subj.%d", 1:24))) %>% 
+  mutate(sampleNum = 1:n()) %>%
+  pivot_longer(!sampleNum, names_to = "subj_idx", 
+               names_transform = list("subj_idx" = as.integer),
+               names_prefix = "v_cVD_subj.", values_to = "v2") 
+v_all = v0_values %>% 
+  right_join(v1_values, by = c("sampleNum", "subj_idx")) %>% 
+  right_join(v2_values, by = c("sampleNum", "subj_idx")) 
+
+rm(list = c("v0_values", "v1_values", "v2_values"))
+
+v_summary = v_all %>%
+  select(subj_idx, v0, v1, v2) %>% 
+  pivot_longer(!subj_idx, 
+               names_to = "paramName", 
+               values_to = "sampleValue") %>%
+  group_by(subj_idx, paramName) %>% 
+  reframe(hdi_low = HDIofMCMC(sampleValue)[1],
+          hdi_high = HDIofMCMC(sampleValue)[2],
+          sampleMean = mean(sampleValue)) %>% 
+  group_by(paramName) %>%
+  arrange(desc(sampleMean)) %>%
+  mutate(idx = 1:n())
+```
+
+```{r posterior-ind-v-plot, include = TRUE}
+ggplot(v_summary, aes(x = idx)) + 
+  geom_segment(aes(y=hdi_low,yend=hdi_high, x=idx, xend=idx), 
+               color = "grey", size = 1)  +
+  geom_point(aes(y = sampleMean), color = "black") + 
+  facet_wrap(~factor(paramName), scales = "free") +
+  geom_hline(yintercept = 0, color = "red", alpha = 1, linetype = "dotted") +
+  labs(x = "Subject", y = "Posterior density",
+       title = "Drift rate - Individual level")
+```
+
+# Posterior predictive checks 
+
+- Simulated the best-fitting model 500 times with the samples from the posterior distributions to evaluate how well the best-fitting model explains the observed data.
+
+```{r ppc-prep}
+obsData =  read.csv("Model2_data.csv")
+obsData = obsData %>%
+  mutate(data_idx = 1:n())
+
+trInfo = obsData %>%
+  select(data_idx, subj_idx, trialType, tVD)
+
+choice_obs = obsData %>%
+  group_by(subj_idx, trialType) %>%
+  reframe(choiceP_obs = mean(response))
+
+ppd_2m = read.csv("Model2f_PPC.csv")
+ppd_2m = ppd_2m %>% 
+  mutate(response_ppd = ifelse(rt > 0, 1, 0),
+         rt_ppd = abs(rt), 
+         data_idx = X + 1, # as data comes from python
+         sample = sample + 1,
+         subj_idx = as.numeric(gsub("wfpt.", "", node))) %>%
+  select(data_idx, subj_idx, sample, rt_ppd, response_ppd)
+ppd_2m = ppd_2m %>%
+  right_join(trInfo, by = c("data_idx", "subj_idx"))
+
+ppd_choice_summarise = function(ppd)  {
+  tmp = ppd %>%
+    group_by(sample, subj_idx, trialType) %>%
+    reframe(choiceP = mean(response_ppd)) %>%
+    group_by(subj_idx, trialType) %>%
+    reframe(mean_choiceP = mean(choiceP), 
+            lb_choiceP = quantile(choiceP, 0.025), 
+            ub_choiceP = quantile(choiceP, 0.975), 
+            .groups = "drop")
+  return(tmp)
+}
+
+ppd_rt_summarise = function(ppd) {
+  tmp = ppd %>%
+    group_by(sample, subj_idx, trialType, response_ppd) %>% 
+    reframe(rt_qt = quantile(rt_ppd, c(0.1, 0.3, 0.5, 0.7, 0.9)),
+            q = c(10, 30, 50, 70, 90), .groups = "drop") %>%
+    group_by(subj_idx, trialType, response_ppd, q) %>%
+    reframe(mean_rt_qt = mean(rt_qt),
+            lb_rt_qt = quantile(rt_qt, 0.025), 
+            ub_rt_qt = quantile(rt_qt, 0.975), 
+            .groups = "drop") %>%
+    rename(response = response_ppd)
+  return(tmp)
+}
+```
+
+## Choice
+
+- Correlation between observed data and simulated data 
+
+```{r choice-ppd-cor, include = TRUE}
+tmp = ppd_choice_summarise(ppd_2m) %>%
+  right_join(choice_obs, by = c("subj_idx", "trialType")) %>%
+  mutate(trialType = factor(trialType, c("Hh", "Hl", "hh", "ll"), 
+                            labels = c("HhLl", "HlLh", "HhLh", "HlLl")))
+
+choice_ppd_obs_cor = tmp %>% 
+  group_by(trialType) %>%
+  rstatix::cor_test(mean_choiceP, choiceP_obs)
+
+kable(choice_ppd_obs_cor[, c(1,4,5,6)] %>%
+        mutate(cor = round(cor,2), 
+               statistic = round(statistic,2)))
+```
+
+
+- Plots of each participant's observed data (x-axis) versus simulated data (y-axis).
+  - The blue dot represents the mean, and the vertical blue bar represents the 95% HDI of simulated data. The black diagonal line represents the identity line (y = x). The simulated data from the best-fitting model aligns well with the observed data, showing a successful model fit.
+
+```{r choice-ppd-plot, include = TRUE}
+ggplot(tmp, aes(x = choiceP_obs)) +
+  geom_abline() +
+  geom_linerange(aes(ymin = lb_choiceP, ymax = ub_choiceP), 
+                 color = "skyblue", alpha = 0.5) + 
+  geom_point(aes(y = mean_choiceP), color = "blue", size = 1.5, alpha = 0.8) + 
+  facet_wrap(~trialType, ncol = 4) + 
+  labs(x = "Observed choice probability", y = "Predicted choice probability")
+
+```
+
+## Response time distribution 
+
+- Correlation between observed data and simulated data 
+
+```{r rt-ppd-prep-cor, include = TRUE}
+rt_obs = obsData %>%
+  group_by(subj_idx, trialType, response) %>%
+  reframe(rt_qt_obs = quantile(rt, c(0.1, 0.3, 0.5, 0.7, 0.9)),
+            q = c(10, 30, 50, 70, 90), .groups = "drop")
+
+tmp = ppd_rt_summarise(ppd_2m) %>%
+  right_join(rt_obs, by = c("subj_idx", "trialType", "response", "q")) %>% 
+  mutate(trialType = factor(trialType, c("Hh", "Hl", "hh", "ll"), 
+                            labels = c("HhLl", "HlLh", "HhLh", "HlLl")), 
+         response = ifelse(response == 0, "lower-value\ntarget", "higher-value\ntarget"))
+
+rt_ppd_obs_cor = tmp %>% 
+  group_by(q) %>%
+  rstatix::cor_test(mean_rt_qt, rt_qt_obs)
+
+kable(rt_ppd_obs_cor[, c(1,4,5,6)] %>%
+        mutate(cor = round(cor,2), 
+               statistic = round(statistic,2),
+               q = q/100) %>%
+        rename(quantile = q))
+```
+
+
+- Plots of each participant's observed data (x-axis) versus simulated data (y-axis).
+  - The blue dot represents the mean, and the vertical blue bar represents the 95% HDI of simulated data. The black diagonal line represents the identity line (y = x). The simulated data from the best-fitting model aligns well with the observed data, showing a successful model fit.
+
+```{r rt-ppd-prep-fig, include = TRUE}
+# plot predicted vs observed RT quantiles, separating responses
+qList = c(10, 30, 50, 70, 90)
+qName = sprintf("%.1f quantile", c(0.1, 0.3, 0.5, 0.7, 0.9))
+
+for (figIndex in 1:5) {
+  fig = ggplot(tmp %>% filter(q == qList[figIndex]), aes(x = rt_qt_obs)) +
+  geom_abline() +
+  geom_linerange(aes(ymin = lb_rt_qt, ymax = ub_rt_qt), color = "skyblue",
+                 alpha = 0.6) + 
+  geom_point(aes(y = mean_rt_qt),size = 1.5, alpha = 0.8, color = "blue") +
+  facet_grid(response~trialType) +
+  labs(x = "Observed RT(s)", y = "Predicted RT(s)",
+       title = qName[figIndex])
+  print(fig)
+}
+```
+
+
+
+
+
+

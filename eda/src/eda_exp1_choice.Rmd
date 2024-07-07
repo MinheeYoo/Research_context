@@ -1,0 +1,281 @@
+---
+title: "EDA: Experiment 1 - Choice"
+output: 
+  github_document:
+    fig_width: 8
+    fig_height: 5
+    keep_html: TRUE
+---
+
+```{r setup, include=FALSE}
+rm(list=ls()) 
+
+library(kableExtra)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(lme4)
+library(lmerTest)
+library(rstatix)
+library(patchwork)
+
+knitr::opts_chunk$set(echo = FALSE, include = FALSE)
+
+theme_set(theme_classic() +
+            theme(text = element_text(size = 14)))
+```
+
+
+```{r load_data}
+dataAll = readxl::read_excel("../data/exp1_choice_data.xlsx", sheet = 1)
+
+data_reg = dataAll %>% 
+  mutate(TrialType = factor(TrialType, 
+                            levels = c("No_context", "Hh", "Hl", "hh", "ll")), 
+         absVD = abs(LeftValue - RightValue), 
+         highTargetCV = ifelse(LeftRank > RightRank, 
+                               (LeftContext1_val + LeftContext2_val)/2, 
+                               (RightContext1_val + RightContext2_val)/2), 
+         lowTargetCV = ifelse(LeftRank > RightRank, 
+                              (RightContext1_val + RightContext2_val)/2,
+                              (LeftContext1_val + LeftContext2_val)/2), 
+         RT_sec = ChoiceRT/1000) %>%
+  select(Subject, TrialType, Correct, absVD, highTargetCV, lowTargetCV, ChoiceRT, RT_sec)
+```
+
+
+# Positive effect of context on choice 
+
+- Two mixed effect logistic regression were ran to test the effect of context on choice. 
+
+- Results 
+  - The target product was more likely to be chosen when it was surrounded by high value products (HhLl trial type, green line Figure 1) compared to when it was surrounded by low value products (HlLh trial type, red line Figure 1). 
+  - As the mean value of context product increased, the target was more likely to be chosen. 
+
+```{r fig1, include = TRUE, fig.cap = "Figure 1. Context effect on choice."}
+tmp = dataAll %>% 
+  filter(TrialType %in% c("No_context", "Hh", "Hl")) %>% 
+  select(Subject, TrialType, LeftValue, RightValue, Choice) %>% 
+  mutate(Choice = ifelse(Choice == 1, 1, 0), # choice: 1 = left, 2 = right
+         LeftV_RightV = LeftValue - RightValue, 
+         valueBin = cut(LeftV_RightV, seq(-26, 26, 4), include.lowest = TRUE, 
+                        labels = seq(-24, 24, 4)),
+         TrialType = factor(TrialType, levels = c("No_context", "Hh", "Hl"),
+                            labels = c("Basic", "HhLl", "HlLh")))
+tmp = tmp %>% 
+  group_by(Subject, TrialType, valueBin) %>%
+  reframe(m = mean(Choice))%>% 
+  group_by(TrialType, valueBin) %>% 
+  reframe(m_group = mean(m), 
+          se = sd(m)/sqrt(n()))
+
+fig1 = ggplot(tmp, aes(x = valueBin, y = m_group, color = TrialType)) + 
+  geom_linerange(aes(ymin = m_group - se, ymax = m_group+se)) + 
+  geom_point() + 
+  geom_line(aes(group = TrialType)) +
+  labs(x = "Difference in value (Left - Right)", 
+       y = "P(left target)", 
+       color = "Trial type") +
+  theme(legend.position = c(0.2, 0.85)) + 
+  scale_color_manual(values = c("HlLh" = "#CA9F92", "HhLl" = "#B1C27A", 
+                                "Basic" = "#637E9D")) +
+  guides(color = guide_legend(reverse = TRUE))
+fig1
+```
+
+- Details on statistical analysis 
+  - Mixed effect model: a logistic regression with a random intercept
+    - Choice ~ absolute value difference between target products + trial type 
+  
+```{r tableS1-run, echo = TRUE, include = TRUE}
+t1 = glmer(Correct ~ absVD + TrialType + (1 | Subject),
+           data = data_reg, family = binomial)
+```
+
+```{r tableS1-print, include = TRUE}
+t1_result = summary(t1)
+kable(t1_result$coefficients, digits = 3)
+```
+
+- Details on statistical analysis 
+  - Mixed effect model: a logistic regression with a random intercept
+    - Choice ~ absolute value difference between target products + the mean value of context products surrounding higher-value target + the mean value of context products surrounding lower-value target
+  
+```{r tableS2-run, echo = TRUE, include = TRUE}
+t2 = glmer(Correct ~ absVD + highTargetCV + lowTargetCV + (1 | Subject),
+             data = data_reg, family = binomial)
+```
+
+```{r tableS2-print, include = TRUE}
+t2_result = summary(t2)
+kable(t2_result$coefficients, digits = 3)
+```
+
+
+
+# The effect of context on response time (RT)
+
+- A mixed effect linear regression was run on response time (RT) to assess the effect of context on response time. 
+
+- Results 
+  - RT in Basic trials (choice without context products) was faster than RT in Context trials (choice with context products) (Figure 2B).
+  - RT was faster when the value difference between target products was larger (Basic trial type, blue line on Figure 2A). 
+  - The decrease in RT as a function of target value difference was larger when the higher value target was surrounded by high value context products (HhLl trial type, green line on Figure 2A). And the negative effect of target value difference was smaller when the higher value target was surrounded by low value context products (HlLh trial type, red line on Figure 2A).
+
+```{r fig2A}
+tmp = dataAll %>% 
+  filter(TrialType %in% c("No_context", "Hh", "Hl")) %>%
+  mutate(TrialType = factor(TrialType, levels = c("No_context", "Hh", "Hl"), 
+                       labels = c("Basic", "HhLl", "HlLh")), 
+         absRD = abs(LeftRank-RightRank)) %>%
+  group_by(Subject, TrialType, absRD) %>% 
+  reframe(mRT = mean(ChoiceRT)) %>% 
+  group_by(TrialType, absRD) %>% 
+  reframe(mRT_group = mean(mRT), 
+          se = sd(mRT) / sqrt(n()), 
+          n = n())
+
+fig2A = ggplot(tmp, aes(x = absRD, y = mRT_group, fill = TrialType, color = TrialType)) + 
+  geom_linerange(aes(ymin = mRT_group - se, ymax = mRT_group + se)) + 
+  geom_point() + 
+  geom_smooth(method = 'lm') + 
+  labs(x = "Absolute difference in rank\n between targets", 
+       y = "RT (ms)",
+       color = "Trial type", fill = "Trial type") + 
+  scale_color_manual(values = c("HlLh" = "#CA9F92", "HhLl" = "#B1C27A", 
+                                "Basic" = "#637E9D")) + 
+  scale_fill_manual(values = c("HlLh" = "#CA9F92", "HhLl" = "#B1C27A", 
+                                "Basic" = "#637E9D")) + 
+  scale_y_continuous(limits = c(250, 1000)) 
+```
+
+
+```{r fig2B}
+tmp = dataAll %>% 
+  filter(TrialType %in% c("No_context", "Hh", "Hl")) %>%
+  mutate(TrialType = factor(TrialType, levels = c("No_context", "Hh", "Hl"), 
+                       labels = c("Basic", "HhLl", "HlLh"))) %>%
+  group_by(Subject, TrialType) %>% 
+  reframe(mRT = mean(ChoiceRT)) 
+
+tmp2 = tmp %>% 
+  group_by(TrialType) %>% 
+  reframe(mRT_group = mean(mRT), 
+          se = sd(mRT) / sqrt(n()), 
+          n = n())
+
+fig2B = ggplot(tmp2, aes(x = TrialType, y = mRT_group)) + 
+  geom_col(aes(fill = TrialType), color = "black") + 
+  geom_point(data = tmp, aes(x = TrialType, y = mRT)) + 
+  geom_linerange(aes(xmin = 2, xmax = 3, y = 1250)) + 
+  geom_linerange(aes(x = 1, ymin = 700, ymax = 1400)) +
+  geom_linerange(aes(xmin = 1, xmax = 2.5, y = 1400)) + 
+  geom_linerange(aes(x = 2.5, ymin = 1250, ymax = 1400)) + 
+  annotate("text", label = "***", x = 1.7, y = 1450, size = 8) + 
+  scale_fill_manual(values = c("HlLh" = "#CA9F92", "HhLl" = "#B1C27A", 
+                               "Basic" = "#637E9D")) + 
+  theme(legend.position = "none") + 
+  scale_y_continuous(limits = c(0, 1500)) + 
+  labs(x = "Trial types\n", y = "RT (ms)")
+```
+
+```{r fig2, include = TRUE, fig.cap = "Figure 2. Context effect on RT."}
+fig2 = fig2A + fig2B + plot_annotation(tag_levels = 'A')
+fig2
+```
+
+
+- Details on statistical analysis 
+  - Mixed effect model: a linear regression with a random intercept
+    - Response time ~ absolute value difference between target products * trial type 
+    - Response time was log-transformed because the RT distribution was right-skewed.
+
+```{r tableS3, echo = TRUE, include = TRUE}
+t3 = lmer(log(RT_sec) ~ absVD*TrialType + (1 | Subject),
+            data = data_reg %>% filter(RT_sec > 0.1)) 
+```
+
+```{r tableS3-print, include = TRUE}
+t3_result = summary(t3)
+kable(t3_result$coefficients, digits = 3)
+```
+
+
+# Choice - Response time relationship
+
+- The choice probability was plotted as a function of response time to test starting point bias hypothesis. 
+- Result
+  - The positive context effect on choice was observed in fast responses (first and second RT bin in Figure 3). 
+
+```{r tableS4-prep}
+RT_bins = dataAll %>% 
+  filter(TrialType %in% c("Hh", "Hl")) %>%
+  group_by(Subject, TrialType) %>%
+  reframe(q = quantile(ChoiceRT, c(0.2, 0.4, 0.6, 0.8),.groups = "drop"),
+            bName = c("b2", "b3", "b4", "b5"),
+            b1 = min(ChoiceRT), 
+            b6 = max(ChoiceRT)) %>%
+  pivot_wider(names_from = bName, values_from = q) %>%
+  select(Subject, TrialType, b1, b2, b3, b4, b5, b6)
+
+choiceP_rt = dataAll %>% 
+  select(Subject, TrialType, Correct, ChoiceRT) %>%
+  right_join(RT_bins, by = c("Subject", "TrialType")) %>%
+  mutate(rtBin = case_when(
+    b1<=ChoiceRT & ChoiceRT <= b2 ~ "1",
+    b2<ChoiceRT & ChoiceRT <= b3 ~ "2",
+    b3<ChoiceRT & ChoiceRT <= b4 ~ "3",
+    b4<ChoiceRT & ChoiceRT <= b5 ~ "4",
+    b5<ChoiceRT & ChoiceRT <= b6 ~ "5"), 
+    TrialType = factor(TrialType, levels = c("Hh", "Hl"), 
+                       labels = c("HhLl", "HlLh"))) %>%
+  group_by(Subject, TrialType, rtBin) %>%
+  reframe(choiceP = mean(Correct))
+
+choiceP_rt_group = choiceP_rt %>%
+  group_by(TrialType, rtBin) %>%
+  reframe(
+    choiceP_group = mean(choiceP), 
+    se = sd(choiceP) / sqrt(n())) 
+
+# Table S4
+t4 = choiceP_rt%>% 
+  group_by(rtBin) %>% 
+  t_test(
+    choiceP ~ TrialType, paired = TRUE) %>% 
+  add_significance(cutpoints = c(0, 0.001, 0.01, 0.05, 1),
+                   symbols = c("***", "**", "*", ""))
+
+```
+
+```{r fig3, include = TRUE, fig.cap = "Figure 3. Choice - RT relationship."}
+fig3 = ggplot(choiceP_rt_group, aes(x = rtBin, y = choiceP_group)) +
+  geom_point(aes(color = TrialType), size = 2) + 
+  geom_linerange(aes(ymin = choiceP_group - se, ymax = choiceP_group + se, 
+                     color = TrialType)) + 
+  geom_line(aes(group = TrialType, color = TrialType)) + 
+  scale_color_manual(values = c("HlLh" = "#CA9F92", "HhLl" = "#B1C27A")) + 
+  geom_text(data = t4, 
+            aes(x = rtBin, y = 0.95, label = p.signif), size = 5) + 
+  scale_y_continuous(limits = c(0.4, 1), 
+                     breaks = seq(0.4, 1, by = 0.1)) + 
+  labs(x = "RT Bins", 
+       y = "P(higher-value target)", 
+       color = "Trial type") + 
+  theme(legend.position = c(0.8, 0.8)) 
+fig3
+```
+
+- Details on statistical analysis 
+  - Compared the probability of choosing the higher-value target at each RT bin with paired t-tests.
+  - RT bin was defined by quantiles (0.2, 0.4, 0.6, 0.8) of each trial type's RT. For example, the first bin included all decisions faster than the 0.2 quantile of RT of a trial type, the second bin contained decisions faster than the 0.4 quantile and slower than the 0.2 quantile of RT of the trial type, etc. 
+
+
+```{r tableS4, include = TRUE}
+kable(t4[, c(1,7,9)],
+      caption = "Choice - RT relationship (paired t-tests)",
+      digits = 3)
+```
+
+
+

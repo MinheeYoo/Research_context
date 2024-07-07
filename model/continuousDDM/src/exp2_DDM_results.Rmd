@@ -1,0 +1,538 @@
+---
+title: "Computational model - Valuation"
+output: 
+  github_document:
+    fig_width: 8
+    fig_height: 5
+    keep_html: TRUE
+---
+
+
+```{r setup, include=FALSE}
+rm(list=ls()) 
+
+library(kableExtra)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(lme4)
+library(lmerTest)
+library(rstatix)
+
+knitr::opts_chunk$set(echo = FALSE, include = FALSE)
+
+theme_set(theme_classic() + theme(text = element_text(size = 15)))
+```
+
+
+```{r sim-prep, eval = FALSE}
+simulateTrial = function(nSims, xv, xc, x_avg, threshold, ndt, zCoef, zMag, 
+                         vCoef, vScale) {
+  # simulate trial data given a set of parameter values 
+  # response : rating on a scale
+  # RT : in seconds
+  
+  # set parameters 
+  ## decision space
+  max_x = 30 # maximum value of the scale
+  min_x = 0 # minimum value of the scale
+  max_angle = pi/2 # maximum angle of the decision space
+  
+  # b0 + b1 * average value of a set
+  theta_z = max_angle * sum(zCoef * c(1, x_avg))
+  # b0 + b1 * target value + b2 * average context value
+  theta_v = max_angle * sum(vCoef * c(1, xv, xc))
+  
+  # for fit 3 : fix starting point magnitude
+  dyn.load("CDM.so")
+  tmp=.C("CDM",N=as.integer(nSims), threshold=as.double(threshold),
+         theta_z=as.double(theta_z), zMag=as.double(zMag),
+         theta_v=as.double(theta_v), vScale=as.double(vScale),
+         out_x =numeric(nSims), out_y=numeric(nSims), out_rt=numeric(nSims))
+  
+  # matrix for saving output [response, rt]
+  sim_out = matrix(NA, nrow = nSims, ncol = 2)
+  sim_out[,1] = (atan2(tmp$out_y, tmp$out_x) / max_angle) * (max_x - min_x) # response
+  sim_out[,2] = tmp$out_rt + ndt  # rt
+  
+  return(sim_out)
+}
+```
+
+
+```{r sim-prep2, eval = FALSE}
+dataAll = read.csv("../data/exp2_valuation_data.csv")
+data = dataAll %>%
+  filter(TrialType %in% c("Low", "Medium", "High"),
+         !is.na(SlideValue)) %>%
+  mutate(TrialType = factor(TrialType, levels = c("Low", "Medium", "High")),
+         Exp = factor(Exp, levels = c(0,1), labels = c("Online", "Lab")), 
+         x_v = OldValue/30, # target value
+         x_c = (ContextValue1 + ContextValue2)/60, # average context value
+         x_avg = (ContextValue1 + ContextValue2 + OldValue)/90) %>% 
+  dplyr::select(subjectUniqID, Exp, TrialType, x_avg, x_v, x_c) %>% 
+  rename(id = subjectUniqID)
+
+subjList = sort(unique(data$id))
+
+set.seed(0)
+a = rgamma(length(subjList), 10, scale = 0.2) 
+ndt = rgamma(length(subjList), 1.5, scale = 0.1)
+zMag = rbeta(length(subjList), 4, 20)
+
+zCoef = data.frame()
+vCoef = data.frame()
+
+for (subjID in subjList){
+  # subject specific data
+  tmp = data %>% filter(id == subjID) 
+  
+  z_idx = FALSE
+  vPos_idx = FALSE
+  vNeg_idx = FALSE
+  while (!(z_idx) | !(vPos_idx) | !(vNeg_idx)) {
+    # z coefficients 
+    if (z_idx == FALSE) {
+      zCoef_ind = c(rnorm(1, 0, 0.2), rnorm(1, 1, 0.2))
+      z = zCoef_ind[1] + zCoef_ind[2] * tmp$x_avg
+      if (min(z) >= 0 & (max(z)<1)) {
+        zCoef = rbind(zCoef, 
+                      data.frame(z0 = zCoef_ind[1], 
+                                 z1 = zCoef_ind[2]))
+        z_idx =TRUE
+      }}
+    
+    # Drift coefficients 
+    if (vPos_idx == FALSE | vNeg_idx == FALSE) {
+      vCoef_ind = c(rnorm(1, 0, 0.2), rnorm(1, 1, 0.2), 
+                    rnorm(1, 0.2, 0.1), rnorm(1, -0.2, 0.1))
+      # assimilation 
+      v = vCoef_ind[1] + vCoef_ind[2] * tmp$x_v + vCoef_ind[3] * tmp$x_c
+      if (min(v) >= 0 & (max(v)<1)) {
+        vPos_idx = TRUE
+      }
+      # contrast
+      v = vCoef_ind[1] + vCoef_ind[2] * tmp$x_v + vCoef_ind[4] * tmp$x_c
+      if (min(v) >= 0 & (max(v)<1)) {
+        vNeg_idx = TRUE
+      }
+      
+      if (vPos_idx == TRUE & vNeg_idx == TRUE) {
+        vCoef = rbind(vCoef, 
+                      data.frame(v0 = vCoef_ind[1], 
+                                 v1 = vCoef_ind[2], 
+                                 v2_pos = vCoef_ind[3], 
+                                 v2_neg = vCoef_ind[4]))}}
+  }
+}
+
+params_all = data.frame(
+  id = subjList, threshold = a, ndt = ndt, 
+  zCoef = zCoef, zMag = zMag, vCoef = vCoef)
+
+save(params_all, file = "params_for_simulation.RData")
+```
+
+
+```{r sim-run, eval = FALSE}
+# Initialize data frames to save simulations
+m1 = data.frame() 
+m2 = data.frame() 
+m3_pos = data.frame() 
+m3_neg = data.frame()
+m4_pos = data.frame()
+m4_neg = data.frame()
+
+for (subjID in subjList) {
+  # filter subject data 
+  subjData = data %>%
+    filter(id == subjID) %>%
+    mutate(trial = 1:n()) 
+  
+  # parameter of subject
+  # params = [threshold, ndt, z0, z1, zMag, v0, v1, v2_pos, v2_neg]
+  params = unlist(params_all[params_all$id == subjID, 2:10])
+  
+  # Model1 (Null model): no z bias, no v bias 
+  sim_ind = matrix(NA, nrow(subjData), 2)
+  for (i in 1:nrow(subjData)) {
+    tmp = simulateTrial(nSims = 1, xv = subjData$x_v[i], xc = subjData$x_c[i],
+                        x_avg = subjData$x_avg[i],
+                        threshold = params[1], ndt = params[2], 
+                        zCoef = c(0,0), zMag = 0, 
+                        vCoef = c(params[6:7], 0), vScale = 1) 
+    sim_ind[i,1] = tmp[1] # response
+    sim_ind[i,2] = tmp[2] # RT 
+  }
+  m1 = rbind(m1, data.frame(subjData, y_v = sim_ind[,1], rt = sim_ind[,2]))
+  
+  # Model2 (zBias model): z Bias only, no v bias 
+  sim_ind = matrix(NA, nrow(subjData), 2)
+  for (i in 1:nrow(subjData)) {
+    tmp = simulateTrial(nSims = 1, xv = subjData$x_v[i], xc = subjData$x_c[i],
+                        x_avg = subjData$x_avg[i],
+                        threshold = params[1], ndt = params[2], 
+                        zCoef =  params[3:4], zMag = params[5], 
+                        vCoef = c(params[6:7], 0), vScale = 1) 
+    sim_ind[i,1] = tmp[1] # response
+    sim_ind[i,2] = tmp[2] # RT 
+  }
+  m2 = rbind(m2, data.frame(subjData, y_v = sim_ind[,1], rt = sim_ind[,2]))
+  
+  # Model 3 (vBias model): no z bias, v bias only 
+  ## Positive context effect (assimilation effect)
+  sim_ind = matrix(NA, nrow(subjData), 2)
+  for (i in 1:nrow(subjData)) {
+    tmp = simulateTrial(nSims = 1, xv = subjData$x_v[i], xc = subjData$x_c[i],
+                        x_avg = subjData$x_avg[i],
+                        threshold = params[1], ndt = params[2], 
+                        zCoef =  c(0,0), zMag = 0, 
+                        vCoef = params[6:8], vScale = 1) 
+    sim_ind[i,1] = tmp[1] # response
+    sim_ind[i,2] = tmp[2] # RT 
+  }
+  m3_pos = rbind(m3_pos, data.frame(subjData, y_v = sim_ind[,1], rt = sim_ind[,2]))
+  
+  # Model 3(vBias model): no z bias, v bias only 
+  ## negative context effect (contrast effect)
+  sim_ind = matrix(NA, nrow(subjData), 2)
+  for (i in 1:nrow(subjData)) {
+    tmp = simulateTrial(nSims = 1, xv = subjData$x_v[i], xc = subjData$x_c[i],
+                        x_avg = subjData$x_avg[i],
+                        threshold = params[1], ndt = params[2], 
+                        zCoef = c(0,0), zMag = 0, 
+                        vCoef = params[c(6,7,9)], vScale = 1) 
+    sim_ind[i,1] = tmp[1] # response
+    sim_ind[i,2] = tmp[2] # RT 
+  }
+  m3_neg = rbind(m3_neg, data.frame(subjData, y_v = sim_ind[,1], rt = sim_ind[,2]))
+  
+  
+  # Model 4 (Full model): zBias + vBias 
+  ## Positive context effect (Assimilation effect)
+  sim_ind = matrix(NA, nrow(subjData), 2)
+  for (i in 1:nrow(subjData)) {
+    tmp = simulateTrial(nSims = 1, xv = subjData$x_v[i], xc = subjData$x_c[i],
+                        x_avg = subjData$x_avg[i],
+                        threshold = params[1], ndt = params[2], 
+                        zCoef = params[3:4], zMag = params[5], 
+                        vCoef = params[6:8], vScale = 1) 
+    sim_ind[i,1] = tmp[1] # response
+    sim_ind[i,2] = tmp[2] # RT 
+  }
+  m4_pos = rbind(m4_pos, data.frame(subjData, y_v = sim_ind[,1], rt = sim_ind[,2]))
+  
+  ## Negative context effect (Contrast effect)
+  sim_ind = matrix(NA, nrow(subjData), 2)
+  for (i in 1:nrow(subjData)) {
+    tmp = simulateTrial(nSims = 1, xv = subjData$x_v[i], xc = subjData$x_c[i],
+                        x_avg = subjData$x_avg[i],
+                        threshold = params[1], ndt = params[2], 
+                        zCoef =  params[3:4], zMag = params[5], 
+                        vCoef = params[c(6,7,9)], vScale =  1) 
+    sim_ind[i,1] = tmp[1] # response
+    sim_ind[i,2] = tmp[2] # RT 
+  }
+  m4_neg = rbind(m4_neg, data.frame(subjData, y_v = sim_ind[,1], rt = sim_ind[,2]))
+}
+
+save(params_all, m1, m2, m3_pos, m3_neg, m4_pos, m4_neg, 
+     file = "simulated_data.RData")
+```
+
+
+- Simulated a WTP accumulation model, the Diffusion Model for responses on a continuous scale, to understand how context influences valuation.
+
+
+# Description of models 
+1. Effect of context on starting point
+- Baseline model: No starting point bias. The starting point is set at the origin.
+
+$$
+z_i = [0,0]
+$$
+- Starting point model: The average value of the three products determines the direction of the starting point.
+
+$$
+z_{dir,i} \sim z_0 + z_1WTP_{average,i}
+$$
+
+2. Effect of context on drift 
+- Baseline model: Only the value of the target determines the direction of the drift. 
+
+$$
+v_{dir,i} \sim v_0 + v_1WTP_{target,i}
+$$
+
+- Drift model: The value of the target product and the context products determine the direction of the drift. Positive (positive $v_2$) and negative effect (negative $v_2$)of context on drift rate were considered. 
+
+$$
+v_{dir,i} \sim v_0 + v_1WTP_{target,i} + v_2WTP_{context,i}
+$$
+
+- Simulated six variants of the WTP accumulation model. Each model represented a unique hypothesis on the effect of context on the starting point and the drift. 
+- Examined which of the six models best mimicked the behavioral data. 
+
+
+```{r, bid-rt-prep}
+bid_rt_func = function(data) {
+  RT_bins = data %>% 
+    filter(TrialType %in% c("Low", "High")) %>%
+    group_by(id, TrialType) %>%
+    reframe(q = quantile(rt, c(0.2, 0.4, 0.6, 0.8),.groups = "drop"),
+            bName = c("b2", "b3", "b4", "b5"),
+            b1 = min(rt), 
+            b6 = max(rt)) %>%
+    pivot_wider(names_from = bName, values_from = q) %>%
+    select(id, TrialType, b1, b2, b3, b4, b5, b6) %>% ungroup()
+  
+  bid_rt = data %>% 
+    filter(TrialType %in% c("Low", "High")) %>%
+    right_join(RT_bins, by = c("id", "TrialType")) %>%
+    mutate(rtBin = case_when(
+      b1<=rt & rt <= b2 ~ "1",
+      b2<rt & rt <= b3 ~ "2",
+      b3<rt & rt <= b4 ~ "3",
+      b4<rt & rt <= b5 ~ "4",
+      b5<rt & rt <= b6 ~ "5")) %>%
+    group_by(id, TrialType, rtBin) %>%
+    reframe(meanBid = mean(y_v)) %>% ungroup()
+  
+  pairedT = bid_rt %>% 
+    group_by(rtBin) %>% 
+    t_test(
+      meanBid ~ TrialType, paired = TRUE) %>% 
+    add_significance(cutpoints = c(0, 0.001, 0.01, 0.05, 1),
+                     symbols = c("***", "**", "*", ""))
+  
+  bid_rt_group = bid_rt %>%
+    group_by(TrialType, rtBin) %>%
+    reframe(
+      meanBid_group = mean(meanBid), 
+      se = sd(meanBid) / sqrt(n()), 
+      n = n()) %>% ungroup()
+  
+  return(list(pairedT = pairedT, bid_rt_group = bid_rt_group))
+}
+```
+
+
+```{r bid-rt-summary}
+load("simulated_data.RData")
+
+m1_bid_rt = bid_rt_func(m1)
+m2_bid_rt = bid_rt_func(m2)
+m3_pos_bid_rt = bid_rt_func(m3_pos)
+m3_neg_bid_rt = bid_rt_func(m3_neg)
+m4_pos_bid_rt = bid_rt_func(m4_pos)
+m4_neg_bid_rt = bid_rt_func(m4_neg)
+```
+
+## Simulation results
+
+- Only the starting point model demonstrated the observed relationship between the bids and the RT. The starting point model showed a positive context effect on the bids only in fast responses. The starting point model did not show a positive context effect in slow responses.
+
+```{r sim-cor}
+t15 = rbind(
+  data.frame(modelName = "Baseline", m1_bid_rt$pairedT), 
+  data.frame(modelName = "zBias", m2_bid_rt$pairedT), 
+  data.frame(modelName = "vBias+", m3_pos_bid_rt$pairedT), 
+  data.frame(modelName = "vBias-", m3_neg_bid_rt$pairedT),
+  data.frame(modelName = "zBias_vBias+", m4_pos_bid_rt$pairedT), 
+  data.frame(modelName = "zBias_vBias-", m4_neg_bid_rt$pairedT)) %>% 
+  mutate(modelName = factor(modelName, 
+                            levels = c("Baseline", "zBias", "vBias+", 
+                                       "vBias-", "zBias_vBias+", "zBias_vBias-"), 
+                            labels = c("No context effect", "Starting point", 
+                                       "Positive drift", "Negative drift", 
+                                       "Starting point +\nPositive drift",
+                                       "Starting point +\nNegative drift")))
+```
+
+
+```{r sim-plot, include = TRUE}
+bid_rt_all = rbind(
+  data.frame(modelName = "Baseline", m1_bid_rt$bid_rt_group), 
+  data.frame(modelName = "zBias", m2_bid_rt$bid_rt_group), 
+  data.frame(modelName = "vBias+", m3_pos_bid_rt$bid_rt_group), 
+  data.frame(modelName = "vBias-", m3_neg_bid_rt$bid_rt_group),
+  data.frame(modelName = "zBias_vBias+", m4_pos_bid_rt$bid_rt_group), 
+  data.frame(modelName = "zBias_vBias-", m4_neg_bid_rt$bid_rt_group)) %>% 
+  mutate(modelName = factor(modelName, 
+                            levels = c("Baseline", "zBias", "vBias+", 
+                                       "vBias-", "zBias_vBias+", "zBias_vBias-"), 
+                            labels = c("No context effect", "Starting point", 
+                                       "Positive drift", "Negative drift", 
+                                       "Starting point +\nPositive drift",
+                                       "Starting point +\nNegative drift")))
+fig5 = ggplot(bid_rt_all %>% 
+                filter(TrialType %in% c("Low", "High")), 
+              aes(x = rtBin, y = meanBid_group)) +
+  geom_point(aes(color = TrialType), size = 2) + 
+  geom_linerange(aes(ymin = meanBid_group - se, ymax = meanBid_group + se, 
+                     color = TrialType)) + 
+  geom_line(aes(group = TrialType, color = TrialType)) + 
+  scale_color_manual(values = c("Low" = "#CA9F92", "High" = "#B1C27A")) +
+  geom_text(data = t15 %>% mutate(yPos = 17.5),
+            aes(x = rtBin, y = yPos, label = p.signif), size = 3) +
+  labs(x = "RT Bins", y = "Mean bid (NIS)", 
+       color = "Context\n value") + 
+  facet_wrap(~modelName, ncol = 3) + 
+  scale_y_continuous(limits = c(12, 18)) + 
+  theme_classic() + theme(text = element_text(size = 10)) 
+fig5
+```
+
+
+- Details on statistical analysis 
+  - Compared the mean WTP at each RT bin with paired t-tests. 
+  - RT bin was defined by quantiles (0.2, 0.4, 0.6, 0.8) of each trial type's RT. For example, the first bin included all decisions faster than the 0.2 quantile of RT of a trial type, the second bin contained decisions faster than the 0.4 quantile and slower than the 0.2 quantile of RT of the trial type, etc. 
+  
+```{r, include = TRUE}
+kable(t15[, c(1,2,8,10)],
+      caption = "WTP - RT relationship (paired t-tests)",
+      digits = 3)
+```
+
+
+```{r, eval = FALSE}
+# x_v = old value/30, x_c = context mean/30
+# M1 - Baseline
+m1_rspn = lmer(y_v ~ x_v + x_c + (1 | id), 
+               data = m1 %>% mutate(x_v = 30 * x_v, 
+                                    x_c = 30 * x_c))
+
+# M2 - Starting point
+m2_rspn= lmer(y_v ~ x_v + x_c + (1 | id), 
+              data = m2 %>% mutate(x_v = 30 * x_v, 
+                                   x_c = 30 * x_c))
+
+# M3 - Positive drift
+m3_pos_rspn = lmer(y_v ~ x_v + x_c + (1 | id), 
+                   data = m3_pos %>% mutate(x_v = 30 * x_v, 
+                                            x_c = 30 * x_c))
+
+# M3 - Negative drift
+m3_neg_rspn = lmer(y_v ~ x_v + x_c + (1 | id), 
+                   data = m3_neg %>% mutate(x_v = 30 * x_v, 
+                                            x_c = 30 * x_c))
+
+# M4 - Positive drift + starting point
+m4_pos_rspn = lmer(y_v ~ x_v + x_c + (1 | id), 
+                   data = m4_pos %>% mutate(x_v = 30 * x_v, 
+                                            x_c = 30 * x_c))
+# M4 - Negative drift + starting point
+m4_neg_rspn = lmer(y_v ~ x_v + x_c + (1 | id), 
+                   data = m4_neg %>% mutate(x_v = 30 * x_v, 
+                                            x_c = 30 * x_c))
+
+t13 = rbind(data.frame(modelName = "Baseline", 
+                       varName = c("Intercept", "Target", "Context"), 
+                       summary(m1_rspn)$coefficients), 
+            data.frame(modelName = "zBias", 
+                       varName = c("Intercept", "Target", "Context"), 
+                       summary(m2_rspn)$coefficients), 
+            data.frame(modelName = "vBias+", 
+                       varName = c("Intercept", "Target", "Context"), 
+                       summary(m3_pos_rspn)$coefficients), 
+            data.frame(modelName = "vBias-", 
+                       varName = c("Intercept", "Target", "Context"), 
+                       summary(m3_neg_rspn)$coefficients), 
+            data.frame(modelName = "zBias_vBias+", 
+                       varName = c("Intercept", "Target", "Context"), 
+                       summary(m4_pos_rspn)$coefficients), 
+            data.frame(modelName = "zBias_vBias-", 
+                       varName = c("Intercept", "Target", "Context"), 
+                       summary(m4_neg_rspn)$coefficients)) %>% 
+  `colnames<-`(c("modelName", "varName", "B", "SE", "df", "t", "p")) %>%
+  add_significance(p.col = "p", 
+                   cutpoints = c(0, 0.001, 0.01, 0.05, 1),
+                   symbols = c("***", "**", "*", "n.s"))
+rownames(t13) = NULL
+```
+
+
+
+```{r context-on-rt, eval = FALSE}
+# x_v = old value/30, x_c = context mean/30
+# M1: Baseline
+m1_rt = lmer(rt ~ absDiff + (1 | id), 
+             data = m1 %>% mutate(x_v = 30 * x_v, 
+                                  x_c = 30 * x_c, 
+                                  absDiff = abs(x_v - x_c)))
+
+# M2: Starting point bias only
+m2_rt = lmer(rt ~ absDiff + (1 | id), 
+             data = m2 %>% mutate(x_v = 30 * x_v, 
+                                  x_c = 30 * x_c, 
+                                  absDiff = abs(x_v - x_c)))
+
+# M3_pos: Positive drift bias
+m3_pos_rt = lmer(rt ~ absDiff + (1 | id), 
+                 data = m3_pos %>% mutate(x_v = 30 * x_v, 
+                                          x_c = 30 * x_c, 
+                                          absDiff = abs(x_v - x_c)))
+
+# M3_neg: Negative drift bias
+m3_neg_rt = lmer(rt ~ absDiff + (1 | id), 
+                 data = m3_neg %>% mutate(x_v = 30 * x_v, 
+                                          x_c = 30 * x_c, 
+                                          absDiff = abs(x_v - x_c)))
+
+# M4_pos: Positive drift bias + starting point
+m4_pos_rt = lmer(rt ~ absDiff + (1 | id), 
+                 data = m4_pos %>% mutate(x_v = 30 * x_v, 
+                                          x_c = 30 * x_c, 
+                                          absDiff = abs(x_v - x_c)))
+# M4_neg: Negative drift bias + starting point
+m4_neg_rt = lmer(rt ~ absDiff + (1 | id), 
+                 data = m4_neg %>% mutate(x_v = 30 * x_v, 
+                                          x_c = 30 * x_c, 
+                                          absDiff = abs(x_v - x_c)))
+
+t14 = rbind(data.frame(modelName = "Baseline", 
+                       varName = c("Intercept", "absDiff"), 
+                       summary(m1_rt)$coefficients), 
+            data.frame(modelName = "zBias", 
+                       varName = c("Intercept", "absDiff"), 
+                       summary(m2_rt)$coefficients), 
+            data.frame(modelName = "vBias+", 
+                       varName = c("Intercept", "absDiff"), 
+                       summary(m3_pos_rt)$coefficients), 
+            data.frame(modelName = "vBias-", 
+                       varName = c("Intercept", "absDiff"), 
+                       summary(m3_neg_rt)$coefficients), 
+            data.frame(modelName = "zBias_vBias+", 
+                       varName = c("Intercept", "absDiff"), 
+                       summary(m4_pos_rt)$coefficients), 
+            data.frame(modelName = "zBias_vBias-", 
+                       varName = c("Intercept", "absDiff"), 
+                       summary(m4_neg_rt)$coefficients)) %>%
+  `colnames<-`(c("modelName", "varName", "B", "SE", "df", "t", "p")) %>%
+  add_significance(p.col = "p", 
+                   cutpoints = c(0, 0.001, 0.01, 0.05, 1),
+                   symbols = c("***", "**", "*", "n.s"))
+rownames(t14) = NULL
+```
+
+
+
+```{r params-plot, eval = FALSE}
+tmp = params_all %>% 
+  pivot_longer(!id, 
+               names_to = "paramName", values_to = "paramValue") %>%
+  mutate(paramName = factor(paramName, 
+                            levels = c("threshold", "ndt", "zCoef.z0", "zCoef.z1", "zMag",
+                                       "vCoef.v0", "vCoef.v1", "vCoef.v2_pos", "vCoef.v2_neg"), 
+                            labels = c("A", "ndt", expression(z[0]), expression(z[1]), 
+                                       expression(z[m]), expression(v[0]), 
+                                       expression(v[1]), 
+                                       expression(paste(v[2][",positive"])), 
+                                       expression(paste(v[2][",negative"])))))
+
+figS6 = ggplot(tmp, aes(x = paramValue)) + 
+  geom_histogram(fill = NA, color = "black", bins = 25) + 
+  facet_wrap(~paramName, ncol = 3, scales = "free", labeller = label_parsed) + 
+  labs(x = "parameter value")
+figS6
+```

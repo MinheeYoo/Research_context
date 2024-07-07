@@ -1,0 +1,293 @@
+---
+title: "EDA: Experiment 2 - Valuation"
+output: 
+  github_document:
+    fig_width: 8
+    fig_height: 5
+    keep_html: TRUE
+---
+
+```{r setup, include=FALSE}
+rm(list=ls()) 
+
+library(kableExtra)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(lme4)
+library(lmerTest)
+library(rstatix)
+library(patchwork)
+
+knitr::opts_chunk$set(echo = FALSE, include = FALSE)
+
+theme_set(theme_classic() +
+            theme(text = element_text(size = 14)))
+```
+
+
+```{r dataprep}
+dataAll = read.csv("../data/exp2_valuation_data.csv")
+data = dataAll %>% 
+  filter(TrialType %in% c("Low", "Medium", "High"),
+         !is.na(SlideValue))
+
+data_reg = data %>%
+  mutate(TrialType = factor(TrialType, levels = c("Medium", "Low", "High")),
+         Exp = factor(Exp, levels = c(0,1), labels = c("Online", "Lab")), 
+         cMean = (ContextValue1 + ContextValue2)/2, 
+         cMean_target = cMean - OldValue, 
+         RT_sec = SlideRT / 1000) 
+```
+
+# Positive effect of context on valuation 
+
+- A mixed-effect linear regression was ran to test the effect of context on valuation. 
+- Result 
+  - Willingness-to-pay (WTP) for a target product increased when the target product was surrounded by high value context products (Figure 1). 
+  - Note) Willingness-to-pay: measure of subjective value for consumer products 
+
+```{r fig1-prep}
+tmp = data %>%
+  mutate(Exp = factor(Exp, levels = c(0,1), labels = c("Online", "Lab")),
+         cMean = (ContextValue1 + ContextValue2)/2, 
+         valueBin = cut(cMean, seq(0, 30, 2), include.lowest = TRUE)) %>%
+  group_by(Exp, subjectUniqID, valueBin) %>% 
+  reframe(mBid = mean(SlideValue)) %>% # mean value in each bin
+  group_by(Exp, valueBin) %>%
+  reframe(mBid_group = mean(mBid), # average across subjects
+          se = sd(mBid)/sqrt(n()), 
+          n = n()) %>%
+  mutate(valueBin = as.numeric(valueBin), # make into numeric scale
+         valueBin = 2*(valueBin-1) + 1)
+
+fig1A = ggplot(tmp %>% filter(Exp == "Online"), aes(x = valueBin, y = mBid_group)) + 
+  geom_ribbon(aes(ymin = mBid_group - se, ymax = mBid_group + se), 
+              fill = "skyblue", alpha = 0.5) + 
+  geom_line() + 
+  labs(x = "Context value mean (NIS)", y = "Mean bid (NIS)", title = "Online-valuation") +  
+  scale_x_continuous(breaks = seq(0, 30, 5)) +
+  theme(plot.title = element_text(hjust = 0.5))
+
+fig1B = ggplot(tmp %>% filter(Exp == "Lab"), aes(x = valueBin, y = mBid_group)) + 
+  geom_ribbon(aes(ymin = mBid_group - se, ymax = mBid_group + se), 
+              fill = "skyblue", alpha = 0.5) + 
+  geom_line() + 
+  labs(x = "Context value mean (NIS)", y = "Mean bid (NIS)", title = "Lab-valuation") +  
+  scale_x_continuous(breaks = seq(0, 30, 5)) +
+  theme(plot.title = element_text(hjust = 0.5))
+```
+
+```{r fig1, include = TRUE, fig.cap = "Figure 1. Context effect on valuation."}
+fig1 = fig1A + fig1B + plot_annotation(tag_levels = 'A')
+fig1
+```
+
+
+- Details on statistical analysis 
+  - Mixed effect model: a linear regression with a random intercept
+    - WTP with context products ~ WTP without context products + the mean WTP of context products
+- Online sample
+
+```{r tableS10-online, echo = TRUE, include = TRUE}
+t10_online = lmer(SlideValue ~ OldValue + cMean + (1 | subjectUniqID), 
+                  data = data_reg %>% filter(Exp == "Online"))
+```
+
+
+```{r, tableS10-online-print, include = TRUE}
+t10_online_result = summary(t10_online)
+kable(t10_online_result$coefficients, digits= 3)
+```
+
+- Lab sample
+  
+```{r tableS10-lab, echo = TRUE, include = TRUE}
+t10_lab = lmer(SlideValue ~ OldValue + cMean + (1 | subjectUniqID), 
+               data = data_reg %>% filter(Exp == "Lab"))
+```
+
+```{r tableS10-lab-print, include = TRUE}
+t10_lab_result = summary(t10_lab)
+kable(t10_lab_result$coefficients, digits = 3)
+```
+
+
+
+# The context effects on valuation response time
+
+- A mixed effect linear regression was run to test the effect of context on response time. 
+- Results 
+  - RT was faster when the value of target product was similar to the average value of context products (only in online participants).  
+  
+```{r fig2-Prep}
+tmp = data %>%
+  mutate(cMean = (ContextValue1 + ContextValue2)/2, 
+         cMean_target = cMean - OldValue, 
+         valueBin = cut(abs(cMean_target), seq(0, 30, 2), include.lowest = TRUE),
+         Exp = factor(Exp, levels = c(0,1), labels = c("Online", "Lab"))) %>%
+  group_by(Exp, subjectUniqID, valueBin) %>% 
+  reframe(mRT = mean(SlideRT)) %>%
+  group_by(Exp, valueBin) %>%
+  reframe(mRT_group = mean(mRT), 
+          se = sd(mRT)/sqrt(n()), 
+          n = n()) %>% 
+  mutate(valueBin = as.numeric(valueBin), # make into numeric scale
+         valueBin = 2*(valueBin-1) + 1, 
+         nCutOff = ifelse(Exp == "Lab", 14, 50))
+
+fig2A = ggplot(tmp %>% filter(Exp == "Online", n >= nCutOff), 
+                aes(x = valueBin, y = mRT_group)) + 
+  geom_line() + 
+  geom_ribbon(aes(ymin = mRT_group - se, ymax = mRT_group + se), 
+              fill = "skyblue", alpha = 0.5) + 
+  scale_x_continuous(breaks = seq(0, 26, 2)) + 
+  scale_y_continuous(limits = c(1620, 1760), breaks = seq(1620, 1760, 20)) + 
+  labs(x = "", y = "RT (ms)", title = "Online-valuation") + 
+  theme(plot.title = element_text(hjust = 0.5))
+
+fig2B = ggplot(tmp %>% filter(Exp == "Lab", n >= nCutOff), 
+                aes(x = valueBin, y = mRT_group)) + 
+  geom_line() + 
+  geom_ribbon(aes(ymin = mRT_group - se, ymax = mRT_group + se), 
+              fill = "skyblue", alpha = 0.5) + 
+  scale_x_continuous(breaks = seq(0, 26, 2)) + 
+  scale_y_continuous(limits = c(1400, 1700)) + 
+  labs(x = "", y = "", title = "Lab-valuation") + 
+  theme(plot.title = element_text(hjust = 0.5))
+```
+
+```{r fig2, include = TRUE, fig.cap = "Figure 2. Effect of context on valuation RT."}
+fig2 = fig2A + fig2B + plot_annotation(tag_levels = 'A')
+fig2 = wrap_elements(panel = fig2) +
+  labs(tag = "Context-target absolute difference (NIS)") +
+  theme(
+    plot.tag = element_text(size = 15),
+    plot.tag.position = c(0.55, 0.05)
+  )
+fig2
+```
+
+
+- Details on statistical analysis 
+  - Mixed effect model: a linear regression with a random intercept
+    - Response time ~ absolute difference between the value of the target product and the mean value of context products
+    - Response time was log-transformed because the RT distribution was right-skewed.
+- Online sample
+
+```{r tableS11-online-prep, echo = TRUE, include = TRUE}
+t11_online = lmer(RT_sec ~ abs(cMean_target) + (1|subjectUniqID), 
+                  data = data_reg %>% filter(Exp == "Online"))
+```
+
+```{r tableS11-online-print, include = TRUE}
+t11_online_result = summary(t11_online)
+kable(t11_online_result$coefficients, digits = 3)
+```
+
+- Lab sample 
+
+```{r tableS11-lab-prep, echo = TRUE, include = TRUE}
+t11_lab = lmer(RT_sec ~ abs(cMean_target) + (1|subjectUniqID), 
+               data = data_reg %>% filter(Exp == "Lab"))
+```
+
+```{r tableS11-lab-print, include = TRUE}
+t11_lab_result = summary(t11_lab)
+kable(t11_lab_result$coefficients, digits = 3)
+```
+
+
+# WTP - Response time relationship
+
+- The mean WTP was plotted as a function of response time to test starting point bias hypothesis. 
+- Result
+  - The positive context effect on valuation was observed in fast responses (first RT bin in Figure 3). 
+
+```{r table12prep}
+RT_bins = dataAll %>% 
+  filter(TrialType %in% c("Low", "High"), 
+         !is.na(SlideValue)) %>%
+  group_by(subjectUniqID, TrialType) %>%
+  reframe(q = quantile(SlideRT, c(0.2, 0.4, 0.6, 0.8)),
+          bName = c("b2", "b3", "b4", "b5"),
+          b1 = min(SlideRT), 
+          b6 = max(SlideRT), .groups = "drop") %>%
+  pivot_wider(names_from = bName, values_from = q) %>%
+  select(subjectUniqID, TrialType, b1, b2, b3, b4, b5, b6)
+
+bid_rt = dataAll %>% 
+  filter(TrialType %in% c("Low", "High"), 
+         !is.na(SlideValue)) %>%
+  right_join(RT_bins, by = c("subjectUniqID", "TrialType")) %>%
+  mutate(rtBin = case_when(
+    b1<=SlideRT & SlideRT <= b2 ~ "1",
+    b2<SlideRT & SlideRT <= b3 ~ "2",
+    b3<SlideRT & SlideRT <= b4 ~ "3",
+    b4<SlideRT & SlideRT <= b5 ~ "4",
+    b5<SlideRT & SlideRT <= b6 ~ "5"), 
+    TrialType = factor(TrialType, levels = c("Low", "High")), 
+    Exp = factor(Exp, levels = c(0,1), labels = c("Online", "Lab"))) %>%
+  group_by(Exp, subjectUniqID, TrialType, rtBin) %>%
+  reframe(meanBid = mean(SlideValue))
+
+t12 = bid_rt %>% 
+  group_by(Exp, rtBin) %>% 
+  t_test(
+    meanBid ~ TrialType, paired = TRUE) %>% 
+  add_significance(cutpoints = c(0, 0.001, 0.01, 0.05, 1),
+                   symbols = c("***", "**", "*", ""))
+```
+
+
+```{r fig3-Prep}
+bid_rt_group = bid_rt %>%
+  group_by(Exp, TrialType, rtBin) %>%
+  reframe(
+    meanBid_group = mean(meanBid), 
+    se = sd(meanBid) / sqrt(n())) 
+
+fig3A = ggplot(bid_rt_group %>% filter(Exp == "Online"), 
+               aes(x = rtBin, y = meanBid_group)) +
+  geom_point(aes(color = TrialType), size = 2) + 
+  geom_linerange(aes(ymin = meanBid_group - se, ymax = meanBid_group + se, 
+                     color = TrialType)) + 
+  geom_line(aes(group = TrialType, color = TrialType)) + 
+  scale_color_manual(values = c("Low" = "#CA9F92", "High" = "#B1C27A")) + 
+  geom_text(data = t12 %>% filter(Exp == "Online"), 
+            aes(x = rtBin, y = 15, label = p.signif), size = 5) + 
+  labs(x = "RT Bins", y = "Mean bid (NIS)", title = "Online-valuation") + 
+  scale_y_continuous(limits = c(11.5, 15.3)) +
+  theme(plot.title = element_text(hjust = 0.5),
+        legend.position = "none") 
+
+fig3B = ggplot(bid_rt_group %>% filter(Exp == "Lab"), 
+               aes(x = rtBin, y = meanBid_group)) +
+  geom_point(aes(color = TrialType), size = 2) + 
+  geom_linerange(aes(ymin = meanBid_group - se, ymax = meanBid_group + se, 
+                     color = TrialType)) + 
+  geom_line(aes(group = TrialType, color = TrialType)) + 
+  scale_color_manual(values = c("Low" = "#CA9F92", "High" = "#B1C27A")) + 
+  geom_text(data = t12 %>% filter(Exp == "Lab"), 
+            aes(x = rtBin, y = 13, label = p.signif), size = 5) + 
+  scale_y_continuous(limits = c(7.8, 13.3)) +
+  labs(x = "RT Bins", y = "Mean bid (NIS)", title = "Lab-valuation", 
+       color = "Context\n value") + 
+  theme(plot.title = element_text(hjust = 0.5)) 
+```
+
+
+```{r fig3, include = TRUE, fig.cap = "Figure 3. WTP - RT relationship."}
+fig3 = fig3A + fig3B + plot_annotation(tag_levels = 'A')
+fig3
+```
+
+- Details on statistical analysis 
+  - Compared the mean WTP at each RT bin with paired t-tests. 
+  - RT bin was defined by quantiles (0.2, 0.4, 0.6, 0.8) of each trial type's RT. For example, the first bin included all decisions faster than the 0.2 quantile of RT of a trial type, the second bin contained decisions faster than the 0.4 quantile and slower than the 0.2 quantile of RT of the trial type, etc. 
+
+```{r tableS12-print, include = TRUE}
+kable(t12[, c(1,2,8,10)],
+      caption = "WTP - RT relationship (paired t-tests)",
+      digits = 3)
+```
